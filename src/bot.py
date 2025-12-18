@@ -1,119 +1,155 @@
-"""Main bot orchestration for FEUSD Grid Trading."""
+"""FEUSD Grid Trading Bot - Simple & Reliable."""
 import asyncio
 import logging
 
-from .config import config
-from .exchange import client
-from .grid import generate_grid_orders, generate_flip_order, should_compound, get_profit_since_compound
+from . import config
+from . import exchange as ex
 
 log = logging.getLogger(__name__)
 
 
 class GridBot:
-    """FEUSD Grid Trading Bot."""
-
     def __init__(self):
+        self.last_capital = 0.0
+        self.grid_prices = []
+        self.order_size = 0.0
         self.running = False
 
-    def place_initial_grid(self) -> None:
-        """Place the initial grid with ALO (post-only) orders."""
-        log.info("Placing initial grid (ALO orders)...")
+    # =========== GRID CALCULATION ===========
 
-        # Cancel any existing orders
-        client.cancel_all_orders()
+    def calc_grid(self, capital: float) -> tuple[list[float], float]:
+        """Calculate grid prices and order size based on capital.
 
-        # Get current state
-        mid_price = client.get_mid_price()
-        usdc, feusd = client.get_balances()
-
-        log.info(f"Mid: {mid_price:.4f} | USDC: {usdc:.2f} | FEUSD: {feusd:.2f}")
-
-        # Generate and place orders
-        orders = generate_grid_orders(mid_price, usdc, feusd)
-
-        if orders:
-            client.place_orders_batch(orders, post_only=True)
-        else:
-            log.warning("No orders to place - check capital requirements")
-
-    def refresh_grid(self) -> None:
-        """Refresh the grid - only recalculate if compound threshold reached."""
-        mid_price = client.get_mid_price()
-        usdc, feusd = client.get_balances()
-        total = usdc + (feusd * mid_price)
-        profit = get_profit_since_compound(total)
-
-        log.info(f"Check: ${total:.2f} | Profit: ${profit:.2f} | Mid: {mid_price:.4f}")
-
-        # Only recalculate if we have enough profit to compound
-        if not should_compound(total):
-            log.info(f"Waiting for ${config.compound_threshold - profit:.2f} more profit to compound")
-            return
-
-        log.info(f"Compounding ${profit:.2f} profit!")
-
-        # Cancel and replace all orders with new sizes
-        client.cancel_all_orders()
-        orders = generate_grid_orders(mid_price, usdc, feusd)
-
-        if orders:
-            client.place_orders_batch(orders, post_only=True)
-
-    async def handle_fill(self, filled_order: dict) -> None:
-        """Handle a filled order by placing the opposite order.
-
-        Uses GTC (not post-only) to ensure execution on volatile moves.
+        Returns: (grid_prices, order_size_in_feusd)
         """
-        flip = generate_flip_order(filled_order)
-        side = "BUY" if flip["is_buy"] else "SELL"
-        log.info(f"Fill detected! Placing {side} @ {flip['price']:.4f}")
+        # Number of orders based on capital (min $11 per order)
+        num = min(config.MAX_ORDERS, int(capital / config.MIN_ORDER))
+        if num < 2:
+            return [], 0.0
 
-        # GTC order (not post-only) to ensure fill on volatile moves
-        client.place_order(
-            is_buy=flip["is_buy"],
-            size=flip["size"],
-            price=flip["price"],
-            post_only=False
-        )
+        # Logarithmic grid from LOWER to UPPER
+        ratio = (config.UPPER / config.LOWER) ** (1 / (num - 1))
+        prices = [round(config.LOWER * (ratio ** i), 4) for i in range(num)]
+
+        # Order size: total capital / num orders / ~mid price
+        mid_approx = (config.LOWER + config.UPPER) / 2
+        size = round(capital / num / mid_approx, 2)
+
+        return prices, size
+
+    # =========== ORDER MANAGEMENT ===========
+
+    def sync_grid(self, mid: float, post_only: bool = True) -> None:
+        """Sync orders with grid - only place missing orders."""
+        existing = ex.get_open_orders()
+        existing_prices = set(existing.keys())
+        grid_set = set(self.grid_prices)
+
+        # Cancel orders not in grid
+        to_cancel = [o["oid"] for p, o in existing.items() if p not in grid_set]
+        for oid in to_cancel:
+            ex.cancel(oid)
+            log.info(f"Cancelled stale order {oid}")
+
+        # Place missing orders
+        to_place = []
+        for price in self.grid_prices:
+            if price in existing_prices:
+                continue  # Already have this order
+            is_buy = price < mid
+            to_place.append({"is_buy": is_buy, "size": self.order_size, "price": price})
+
+        if to_place:
+            ex.place_batch(to_place, post_only=post_only)
+            buys = sum(1 for o in to_place if o["is_buy"])
+            sells = len(to_place) - buys
+            log.info(f"Placed {buys} buys + {sells} sells (size: {self.order_size:.2f})")
+
+    # =========== EVENT HANDLERS ===========
+
+    async def on_fill(self, data: dict) -> None:
+        """Handle order fill - place opposite order at same price."""
+        price = float(data["price"])
+        size = float(data["sz"])
+        was_buy = data["side"] == "B"
+
+        # Place opposite order (GTC, not post-only to ensure fill)
+        ex.place(is_buy=not was_buy, size=size, price=price, post_only=False)
+        side = "SELL" if was_buy else "BUY"
+        log.info(f"Fill! Placed {side} {size:.2f} @ {price:.4f}")
 
     async def ws_callback(self, msg: dict) -> None:
         """WebSocket callback for order updates."""
         try:
-            updates = msg.get("data", {}).get("updates", [])
-            for update in updates:
+            for update in msg.get("data", {}).get("updates", []):
                 if update.get("status") == "filled":
-                    await self.handle_fill(update)
+                    await self.on_fill(update)
         except Exception as e:
-            log.error(f"WebSocket error: {e}")
+            log.error(f"WS error: {e}")
+
+    # =========== MAIN LOGIC ===========
+
+    def init_grid(self) -> None:
+        """Initialize grid on startup."""
+        mid = ex.get_mid()
+        usdc, feusd = ex.get_balances()
+        capital = usdc + (feusd * mid)
+
+        log.info(f"Capital: ${capital:.2f} | Mid: {mid:.4f}")
+
+        self.grid_prices, self.order_size = self.calc_grid(capital)
+        self.last_capital = capital
+
+        if not self.grid_prices:
+            log.error(f"Need at least ${config.MIN_ORDER * 2} to start")
+            return
+
+        log.info(f"Grid: {len(self.grid_prices)} levels, {self.order_size:.2f} FEUSD/order")
+        self.sync_grid(mid, post_only=True)
+
+    def check_compound(self) -> None:
+        """Check if we should compound profits."""
+        mid = ex.get_mid()
+        usdc, feusd = ex.get_balances()
+        capital = usdc + (feusd * mid)
+        profit = capital - self.last_capital
+
+        log.info(f"Check: ${capital:.2f} | Profit: ${profit:.2f}")
+
+        if profit < config.COMPOUND_AT:
+            log.info(f"Need ${config.COMPOUND_AT - profit:.2f} more to compound")
+            return
+
+        # Recalculate grid with new capital
+        log.info(f"Compounding ${profit:.2f}!")
+        self.grid_prices, self.order_size = self.calc_grid(capital)
+        self.last_capital = capital
+
+        # Cancel all and replace with new sizes
+        ex.cancel_all()
+        self.sync_grid(mid, post_only=True)
 
     async def run(self) -> None:
         """Main bot loop."""
         log.info("=" * 50)
-        log.info("FEUSD Grid Trading Bot Starting")
-        log.info(f"Grid: {config.lower_bound} - {config.upper_bound}")
-        log.info(f"Max levels: {config.max_levels} | Min order: ${config.min_order_size}")
-        log.info(f"USDC utilization: {config.usdc_utilization * 100:.0f}%")
-        log.info(f"Compound threshold: ${config.compound_threshold}")
+        log.info("FEUSD Grid Bot Starting")
+        log.info(f"Range: {config.LOWER} - {config.UPPER}")
+        log.info(f"Max orders: {config.MAX_ORDERS} | Min: ${config.MIN_ORDER}")
+        log.info(f"Compound at: ${config.COMPOUND_AT}")
         log.info("=" * 50)
 
         self.running = True
+        ex.subscribe(self.ws_callback)
+        self.init_grid()
 
-        # Subscribe to order events
-        client.subscribe_user_events(self.ws_callback)
-
-        # Place initial grid
-        self.place_initial_grid()
-
-        # Main loop
         while self.running:
-            await asyncio.sleep(config.refresh_seconds)
-            self.refresh_grid()
+            await asyncio.sleep(config.REFRESH_SEC)
+            self.check_compound()
 
     def stop(self) -> None:
         """Stop the bot."""
-        log.info("Stopping bot...")
+        log.info("Stopping...")
         self.running = False
-        client.cancel_all_orders()
 
 
 bot = GridBot()

@@ -1,36 +1,23 @@
-"""Configuration management for FEUSD Grid Trading Bot."""
+"""Configuration for FEUSD Grid Trading Bot."""
 import os
-from dataclasses import dataclass
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# API Credentials
+ADDRESS = os.getenv("ADDRESS", "")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 
-@dataclass
-class Config:
-    """Bot configuration loaded from environment variables."""
+# Grid Parameters
+ASSET = "FEUSD"
+LOWER = 0.98          # Protocol liquidation limit
+UPPER = 1.20          # Protocol buyback limit
+MAX_ORDERS = 100      # Max grid levels
+MIN_ORDER = 11        # Hyperliquid minimum ($10 + margin)
+USDC_RESERVE = 0.10   # Keep 10% USDC as reserve
+COMPOUND_AT = 1.0     # Compound when profit >= $1
+REFRESH_SEC = 300     # Check every 5 minutes
 
-    # API credentials
-    address: str = os.getenv("ADDRESS", "")
-    private_key: str = os.getenv("PRIVATE_KEY", "")
-
-    # Grid parameters
-    asset: str = "FEUSD"
-    lower_bound: float = float(os.getenv("LOWER_BOUND", "0.98"))
-    upper_bound: float = float(os.getenv("UPPER_BOUND", "1.20"))
-    max_levels: int = int(os.getenv("MAX_LEVELS", "100"))
-    usdc_utilization: float = float(os.getenv("USDC_UTILIZATION", "0.9"))
-    min_order_size: float = float(os.getenv("MIN_ORDER_SIZE", "11"))
-    refresh_seconds: int = int(os.getenv("REFRESH_SECONDS", "600"))
-    compound_threshold: float = float(os.getenv("COMPOUND_THRESHOLD", "1.0"))
-
-    def __post_init__(self):
-        if not self.address or not self.private_key:
-            raise ValueError("ADDRESS and PRIVATE_KEY must be set in .env")
-        if self.lower_bound >= self.upper_bound:
-            raise ValueError("LOWER_BOUND must be less than UPPER_BOUND")
-        if self.usdc_utilization <= 0 or self.usdc_utilization > 1:
-            raise ValueError("USDC_UTILIZATION must be between 0 and 1")
-
-
-config = Config()
+# Validation
+if not ADDRESS or not PRIVATE_KEY:
+    raise ValueError("Set ADDRESS and PRIVATE_KEY in .env")

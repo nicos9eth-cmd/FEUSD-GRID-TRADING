@@ -1,177 +1,84 @@
 #!/usr/bin/env python3
-"""Standalone simulation script to test grid logic without dependencies."""
+"""Simulate grid scenarios without API calls."""
 
-# === CONFIG ===
-LOWER_BOUND = 0.98
-UPPER_BOUND = 1.20
-MAX_LEVELS = 100
-USDC_UTILIZATION = 0.9
-MIN_ORDER_SIZE = 11
-
-
-def calculate_grid_levels(num_levels: int) -> list[float]:
-    """Calculate logarithmically spaced grid price levels."""
-    ratio = (UPPER_BOUND / LOWER_BOUND) ** (1 / (num_levels - 1))
-    return [LOWER_BOUND * (ratio ** i) for i in range(num_levels)]
+# === CONFIG (same as src/config.py) ===
+LOWER = 0.98
+UPPER = 1.20
+MAX_ORDERS = 100
+MIN_ORDER = 11
+USDC_RESERVE = 0.10
 
 
-def calculate_optimal_levels(total_capital: float) -> int:
-    """Calculate optimal number of grid levels based on available capital."""
-    max_possible = int(total_capital / MIN_ORDER_SIZE)
-    optimal = min(max_possible, MAX_LEVELS)
-    return max(2, optimal)
+def calc_grid(capital: float) -> tuple[list[float], float]:
+    """Calculate grid prices and order size."""
+    num = min(MAX_ORDERS, int(capital / MIN_ORDER))
+    if num < 2:
+        return [], 0.0
+
+    ratio = (UPPER / LOWER) ** (1 / (num - 1))
+    prices = [round(LOWER * (ratio ** i), 4) for i in range(num)]
+    size = round(capital / num / ((LOWER + UPPER) / 2), 2)
+
+    return prices, size
 
 
-def generate_grid_orders(mid_price: float, usdc_available: float,
-                         feusd_available: float) -> list[dict]:
-    """Generate all grid orders based on current balances."""
-    total_capital = usdc_available + (feusd_available * mid_price)
-
-    num_levels = calculate_optimal_levels(total_capital)
-    grid_prices = calculate_grid_levels(num_levels)
-
-    buy_prices = [p for p in grid_prices if p < mid_price]
-    sell_prices = [p for p in grid_prices if p > mid_price]
-
-    orders = []
-
-    # Buy orders (using USDC)
-    if buy_prices:
-        avg_buy_price = sum(buy_prices) / len(buy_prices)
-        total_feusd_to_buy = usdc_available / avg_buy_price
-        buy_size = total_feusd_to_buy / len(buy_prices) if len(buy_prices) > 0 else 0
-
-        if buy_size >= MIN_ORDER_SIZE:
-            for price in buy_prices:
-                orders.append({"is_buy": True, "size": buy_size, "price": price})
-
-    # Sell orders (using FEUSD)
-    if sell_prices:
-        sell_size = feusd_available / len(sell_prices) if len(sell_prices) > 0 else 0
-
-        if sell_size >= MIN_ORDER_SIZE:
-            for price in sell_prices:
-                orders.append({"is_buy": False, "size": sell_size, "price": price})
-
-    return orders
-
-
-def simulate_scenario(name: str, usdc: float, feusd: float, mid_price: float):
-    """Simulate a trading scenario and display results."""
-    print("\n" + "=" * 60)
+def simulate(name: str, usdc: float, feusd: float, mid: float):
+    """Run a simulation scenario."""
+    print(f"\n{'='*60}")
     print(f"SCENARIO: {name}")
-    print("=" * 60)
+    print(f"{'='*60}")
 
-    usdc_available = usdc * USDC_UTILIZATION
-    feusd_available = feusd
+    usdc_avail = usdc * (1 - USDC_RESERVE)
+    capital = usdc_avail + (feusd * mid)
 
-    total_capital = usdc_available + (feusd_available * mid_price)
+    print(f"\nInput:")
+    print(f"  USDC: ${usdc:.2f} (available: ${usdc_avail:.2f})")
+    print(f"  FEUSD: {feusd:.2f}")
+    print(f"  Mid price: ${mid:.4f}")
+    print(f"  Total capital: ${capital:.2f}")
 
-    print(f"\nINPUT:")
-    print(f"  USDC balance:     ${usdc:.2f}")
-    print(f"  USDC available:   ${usdc_available:.2f} (90%)")
-    print(f"  FEUSD balance:    {feusd:.2f}")
-    print(f"  Mid price:        ${mid_price:.4f}")
-    print(f"  Total capital:    ${total_capital:.2f}")
+    prices, size = calc_grid(capital)
 
-    num_levels = calculate_optimal_levels(total_capital)
-    grid_prices = calculate_grid_levels(num_levels)
+    if not prices:
+        print(f"\n❌ INSUFFICIENT CAPITAL")
+        print(f"   Need at least ${MIN_ORDER * 2} (got ${capital:.2f})")
+        return
 
-    print(f"\nGRID ANALYSIS:")
-    print(f"  Optimal levels:   {num_levels}")
-    print(f"  Price range:      ${grid_prices[0]:.4f} - ${grid_prices[-1]:.4f}")
+    buys = [p for p in prices if p < mid]
+    sells = [p for p in prices if p >= mid]
+    spread = ((prices[1] / prices[0]) - 1) * 100 if len(prices) > 1 else 0
 
-    if num_levels > 1:
-        spread_pct = ((grid_prices[1] / grid_prices[0]) - 1) * 100
-        print(f"  Spread per level: {spread_pct:.3f}%")
+    print(f"\nGrid:")
+    print(f"  Levels: {len(prices)}")
+    print(f"  Spread: {spread:.3f}%")
+    print(f"  Order size: {size:.2f} FEUSD (~${size * mid:.2f})")
 
-    orders = generate_grid_orders(mid_price, usdc_available, feusd_available)
+    print(f"\nOrders:")
+    print(f"  Buy orders:  {len(buys)} ({prices[0]:.4f} - {buys[-1]:.4f})" if buys else "  Buy orders:  0")
+    print(f"  Sell orders: {len(sells)} ({sells[0]:.4f} - {prices[-1]:.4f})" if sells else "  Sell orders: 0")
 
-    buy_orders = [o for o in orders if o["is_buy"]]
-    sell_orders = [o for o in orders if not o["is_buy"]]
+    # Profit per round-trip (0.22% spread - 0.08% fees)
+    profit_per_rt = size * mid * (spread / 100 - 0.0008)
+    print(f"\nEstimated profit/round-trip: ${profit_per_rt:.4f}")
 
-    print(f"\nORDERS:")
-    print(f"  Buy orders:       {len(buy_orders)}")
-    print(f"  Sell orders:      {len(sell_orders)}")
-    print(f"  Total orders:     {len(orders)}")
-
-    if buy_orders:
-        buy_size = buy_orders[0]["size"]
-        print(f"\n  BUY SIDE:")
-        print(f"    Size per order: {buy_size:.2f} FEUSD")
-        print(f"    Price range:    ${buy_orders[-1]['price']:.4f} - ${buy_orders[0]['price']:.4f}")
-        print(f"    Total USDC:     ~${usdc_available:.2f}")
-
-    if sell_orders:
-        sell_size = sell_orders[0]["size"]
-        print(f"\n  SELL SIDE:")
-        print(f"    Size per order: {sell_size:.2f} FEUSD")
-        print(f"    Price range:    ${sell_orders[0]['price']:.4f} - ${sell_orders[-1]['price']:.4f}")
-        print(f"    Total FEUSD:    {feusd_available:.2f}")
-
-    print(f"\nSTATUS:")
-    if not orders:
-        print("  ⚠️  NO ORDERS - Capital insufficient!")
-        print(f"     Need at least ${MIN_ORDER_SIZE * 2:.0f} for minimum grid")
-    elif len(buy_orders) == 0:
-        print("  ⚠️  NO BUY ORDERS - No USDC available or below minimum")
-    elif len(sell_orders) == 0:
-        print("  ⚠️  NO SELL ORDERS - No FEUSD available or below minimum")
-    elif len(orders) < 10:
-        print(f"  ⚠️  LOW COVERAGE - Only {len(orders)} orders")
-    else:
-        print("  ✓ Grid ready to deploy")
-
-    return orders
+    print(f"\n✅ READY" if len(prices) >= 10 else f"\n⚠️ LOW COVERAGE ({len(prices)} orders)")
 
 
 def main():
     print("\n" + "#" * 60)
-    print("# FEUSD GRID TRADING - SCENARIO SIMULATOR")
+    print("# FEUSD GRID TRADING SIMULATOR")
     print("#" * 60)
 
-    # Scenario 1: 1500 FEUSD only at 1.02
-    simulate_scenario(
-        "1500 FEUSD only @ 1.02",
-        usdc=0,
-        feusd=1500,
-        mid_price=1.02
-    )
-
-    # Scenario 2: USDC only at 0.99
-    simulate_scenario(
-        "1500 USDC only @ 0.99",
-        usdc=1500,
-        feusd=0,
-        mid_price=0.99
-    )
-
-    # Scenario 3: 100 FEUSD + 10 USDC (insufficient)
-    simulate_scenario(
-        "100 FEUSD + 10 USDC (low capital)",
-        usdc=10,
-        feusd=100,
-        mid_price=1.00
-    )
-
-    # Scenario 4: Balanced portfolio
-    simulate_scenario(
-        "1000 USDC + 1000 FEUSD @ 1.00 (balanced)",
-        usdc=1000,
-        feusd=1000,
-        mid_price=1.00
-    )
-
-    # Scenario 5: Minimum viable
-    simulate_scenario(
-        "Minimum viable (~$1100)",
-        usdc=550,
-        feusd=550,
-        mid_price=1.00
-    )
+    # Test scenarios
+    simulate("1500 FEUSD only @ 1.02", usdc=0, feusd=1500, mid=1.02)
+    simulate("1500 USDC only @ 0.99", usdc=1500, feusd=0, mid=0.99)
+    simulate("100 FEUSD + 10 USDC", usdc=10, feusd=100, mid=1.00)
+    simulate("Balanced $2000 @ 1.00", usdc=1000, feusd=1000, mid=1.00)
+    simulate("Minimum viable $1100", usdc=550, feusd=550, mid=1.00)
+    simulate("Low capital $500", usdc=250, feusd=250, mid=1.00)
 
     print("\n" + "=" * 60)
-    print("SIMULATION COMPLETE")
+    print("DONE")
     print("=" * 60 + "\n")
 
 

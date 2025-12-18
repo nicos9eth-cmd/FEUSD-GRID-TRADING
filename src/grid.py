@@ -47,16 +47,19 @@ def calculate_optimal_levels(total_capital: float) -> int:
     return max(2, optimal)  # Minimum 2 levels (1 buy, 1 sell)
 
 
+def get_profit_since_compound(current_capital: float) -> float:
+    """Get profit since last compound."""
+    if state.last_compound_capital == 0:
+        return 0.0
+    return current_capital - state.last_compound_capital
+
+
 def should_compound(current_capital: float) -> bool:
     """Check if we should recalculate grid for compound interest.
 
     Returns True if capital increased by compound_threshold since last compound.
     """
-    if state.last_compound_capital == 0:
-        return False
-
-    profit = current_capital - state.last_compound_capital
-    return profit >= config.compound_threshold
+    return get_profit_since_compound(current_capital) >= config.compound_threshold
 
 
 def update_compound_state(capital: float) -> None:

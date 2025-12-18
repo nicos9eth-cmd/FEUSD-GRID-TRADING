@@ -4,7 +4,7 @@ import logging
 
 from .config import config
 from .exchange import client
-from .grid import generate_grid_orders, generate_flip_order
+from .grid import generate_grid_orders, generate_flip_order, should_compound, get_profit_since_compound
 
 log = logging.getLogger(__name__)
 
@@ -37,16 +37,22 @@ class GridBot:
             log.warning("No orders to place - check capital requirements")
 
     def refresh_grid(self) -> None:
-        """Refresh the grid - check for compound interest opportunity."""
-        log.info("Refreshing grid...")
-
+        """Refresh the grid - only recalculate if compound threshold reached."""
         mid_price = client.get_mid_price()
         usdc, feusd = client.get_balances()
         total = usdc + (feusd * mid_price)
+        profit = get_profit_since_compound(total)
 
-        log.info(f"Capital: ${total:.2f} | Mid: {mid_price:.4f}")
+        log.info(f"Check: ${total:.2f} | Profit: ${profit:.2f} | Mid: {mid_price:.4f}")
 
-        # Cancel and replace all orders to apply compound interest
+        # Only recalculate if we have enough profit to compound
+        if not should_compound(total):
+            log.info(f"Waiting for ${config.compound_threshold - profit:.2f} more profit to compound")
+            return
+
+        log.info(f"Compounding ${profit:.2f} profit!")
+
+        # Cancel and replace all orders with new sizes
         client.cancel_all_orders()
         orders = generate_grid_orders(mid_price, usdc, feusd)
 

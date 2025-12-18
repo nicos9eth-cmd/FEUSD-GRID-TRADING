@@ -1,6 +1,6 @@
 # FEUSD Grid Trading Bot
 
-Open-source grid trading bot for the **FEUSD/USDC** pair on [Hyperliquid](https://hyperliquid.xyz).
+Open-source grid trading bot for the **FEUSD/USDC** pair on [Hyperliquid](https://app.hyperliquid.xyz/join/NICOS9).<-4% discount fees
 
 ## ⚠️ IMPORTANT WARNINGS
 
